@@ -1,7 +1,8 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc, thread};
 
-use pipewire::{context::{ContextBox, ContextRc}, loop_::Signal, main_loop::MainLoopRc, spa::param::ParamType, types::ObjectType};
-use iced::widget::{Column, button, column, text};
+use iced::futures::SinkExt;
+use pipewire::{context::ContextRc, loop_::Signal, main_loop::MainLoopRc, types::ObjectType};
+use iced::{Subscription, stream, widget::{Column, button, column, text}};
 
 
 struct Node {
@@ -32,42 +33,75 @@ struct NodeGraph {
     nodes: HashMap<u32, Node>,
     ports: HashMap<u32, Port>,
     links: HashMap<u32, Link>,
+    pipewire_sender: Option<pipewire::channel::Sender<PwMessage>>,
 }
 
-enum Message {}
+#[derive(Clone)]
+enum Message {
+    PwSender(pipewire::channel::Sender<PwMessage>),
+    Quit,
+}
 impl NodeGraph {
     fn view(&self) -> Column<'_, Message> {
         let mut column = Column::new();
+        column = column.push(button("quit").on_press(Message::Quit));
         for (_, node) in &self.nodes {
             column = column.push(text(node.node_name.clone()));
         }
         column
     }
     fn update(&mut self, message: Message) {
+        println!("received update message");
         match message {
+            Message::PwSender(sender) => self.pipewire_sender = Some(sender),
+            Message::Quit => {self.pipewire_sender.as_ref().unwrap().send(PwMessage::Terminate).expect("Failed to send message to pipewire");}
+            _ => ()
         }
     }
 }
 
 impl Default for NodeGraph {
     fn default() -> Self {
-        Self { nodes: Default::default(), ports: Default::default(), links: Default::default() }
+        Self { nodes: Default::default(), ports: Default::default(), links: Default::default(), pipewire_sender: None }
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pw_thread = thread::spawn(move || pw_thread().expect("Error running pipewire thread"));
-    iced::application(NodeGraph::default, NodeGraph::update, NodeGraph::view)
-    .run()?;
+#[derive(Debug)]
+enum PwMessage {
+    Terminate,
+}
 
-    pw_thread.join();
+fn pipewire_subscription(_: &NodeGraph) -> Subscription<Message> {
+    Subscription::run(|| stream::channel(100, async |mut output| {
+        let (main_sender, mut main_receiver) = iced::futures::channel::mpsc::channel(256);
+        let (pw_sender, pw_receiver) = pipewire::channel::channel();
+
+        let pw_thread = thread::spawn(move || pw_thread(main_sender, pw_receiver).expect("Error running pipewire thread"));
+        println!("created pipewire thread");
+
+        let result = output.send(Message::PwSender(pw_sender)).await;
+        result.expect("Failed to send sender message");
+        println!("sent sender message");
+
+        while let Some(ev) = main_receiver.recv().await.ok() {
+            let _ = output.send(ev);
+        }
+
+        pw_thread.join();
+    }))
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    iced::application(NodeGraph::default, NodeGraph::update, NodeGraph::view)
+    .subscription(pipewire_subscription)
+    .run()?;
 
     println!("Closed Gracefully");
 
     Ok(())
 }
 
-fn pw_thread() -> Result<(), Box<dyn std::error::Error>> {
+fn pw_thread(main_sender:  iced::futures::channel::mpsc::Sender<Message>, pw_receiver: pipewire::channel::Receiver<PwMessage>) -> Result<(), Box<dyn std::error::Error>> {
     let mainloop = MainLoopRc::new(None)?;
     let context = ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
@@ -170,7 +204,7 @@ fn pw_thread() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 _ => {
-                    println!("New global: {:#?}", global);
+                    // println!("New global: {:#?}", global);
                 }
             }
         })
@@ -200,6 +234,14 @@ fn pw_thread() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .register();
+    let attchrcv = pw_receiver.attach(mainloop.loop_(), {
+        let mainloop = mainloop.clone();
+        move |_| {
+            println!("got a PwMessage message");
+            mainloop.quit();
+        }
+    });
     mainloop.run();
+    println!("quitted pipewire main loop");
     Ok(())
 }
