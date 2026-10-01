@@ -5,6 +5,7 @@ use pipewire::{context::ContextRc, main_loop::MainLoopRc, types::ObjectType};
 use iced::{Subscription, stream, widget::{Column, button, column, text}};
 
 
+#[derive(Debug, Clone)]
 struct Node {
     id: u32,
     // serial instead of id
@@ -13,6 +14,7 @@ struct Node {
     media_class: String,
 }
 
+#[derive(Debug, Clone)]
 struct Port {
     id: u32,
     port_id: String,
@@ -23,6 +25,7 @@ struct Port {
     audio_channel: String,
 }
 
+#[derive(Debug, Clone)]
 struct Link {
     id: u32,
     input_port: u32,
@@ -39,6 +42,7 @@ struct NodeGraph {
 #[derive(Clone)]
 enum Message {
     PwSender(pipewire::channel::Sender<PwMessage>),
+    PwUpdate(PwUpdate),
     Quit,
 }
 
@@ -46,10 +50,21 @@ impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // Self::PwSender(arg0) => f.debug_tuple("PwSender").field(arg0).finish(),
-            Self::PwSender(arg0) => write!(f, "PwSender"),
+            Self::PwSender(_) => write!(f, "PwSender"),
+            Self::PwUpdate(arg0) => f.debug_tuple("PwUpdate").field(arg0).finish(),
             Self::Quit => write!(f, "Quit"),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum PwUpdate {
+    AddNode(Node),
+    AddPort(Port),
+    AddLink(Link),
+    DeleteNode(u32),
+    DeletePort(u32),
+    DeleteLink(u32),
 }
 impl NodeGraph {
     fn view(&self) -> Column<'_, Message> {
@@ -64,6 +79,12 @@ impl NodeGraph {
         println!("received update message {:?}", message);
         match message {
             Message::PwSender(sender) => self.pipewire_sender = Some(sender),
+            Message::PwUpdate(pw_update) => match pw_update {
+                PwUpdate::AddNode(new_node) => {
+                    println!("Adding node {:?}", new_node);
+                }
+                _ => {},
+            },
             Message::Quit => {self.pipewire_sender.as_ref().unwrap().send(PwMessage::Terminate).expect("Failed to send message to pipewire");}
             _ => ()
         }
@@ -83,14 +104,20 @@ enum PwMessage {
 
 fn pipewire_subscription(_: &NodeGraph) -> Subscription<Message> {
     Subscription::run(|| stream::channel(100, async |mut output| {
+        let (bridge_sender, mut bridge_receiver) = tokio::sync::mpsc::channel(256);
         let (pw_sender, pw_receiver) = pipewire::channel::channel();
 
         let result = output.send(Message::PwSender(pw_sender)).await;
         result.expect("Failed to send sender message");
         println!("sent sender message");
 
-        let pw_thread = tokio::task::spawn_blocking(move || pw_thread(output, pw_receiver).expect("Error running pipewire thread"));
+        let pw_thread = tokio::task::spawn_blocking(move || pw_thread(bridge_sender, pw_receiver).expect("Error running pipewire thread"));
         println!("created pipewire thread");
+        
+
+        while let Some(ev) = bridge_receiver.recv().await {
+            output.send(ev).await.expect("Failed to forward mpsc message");
+        }
 
         pw_thread.await.expect("Failed to wait for pipewire thread completion");
     }))
@@ -106,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn pw_thread(main_sender:  iced::futures::channel::mpsc::Sender<Message>, pw_receiver: pipewire::channel::Receiver<PwMessage>) -> Result<(), Box<dyn std::error::Error>> {
+fn pw_thread(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewire::channel::Receiver<PwMessage>) -> Result<(), Box<dyn std::error::Error>> {
     let mainloop = MainLoopRc::new(None)?;
     let context = ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
@@ -117,6 +144,7 @@ fn pw_thread(main_sender:  iced::futures::channel::mpsc::Sender<Message>, pw_rec
     let links: RefCell<HashMap<u32, Link>> = RefCell::new(HashMap::new());
 
     let pending = Rc::new(RefCell::new(None));
+    let main_sender = RefCell::new(main_sender);
 
     let core_weak = core.downgrade();
     let global_pending = Rc::downgrade(&pending);
@@ -143,12 +171,12 @@ fn pw_thread(main_sender:  iced::futures::channel::mpsc::Sender<Message>, pw_rec
                             }
                         }
                         if let Some(media_class) = media_class {
-                            nodes.borrow_mut().insert(global.id, Node {
+                            main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::AddNode(Node {
                                 id: global.id,
                                 node_name: node_name.unwrap(),
                                 application_name: application_name,
                                 media_class: media_class,
-                            });
+                            }))).expect("Failed to send message to main");
                         }
                     }
                 }
