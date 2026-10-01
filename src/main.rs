@@ -1,7 +1,7 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, thread};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use iced::futures::SinkExt;
-use pipewire::{context::ContextRc, loop_::Signal, main_loop::MainLoopRc, types::ObjectType};
+use pipewire::{context::ContextRc, main_loop::MainLoopRc, types::ObjectType};
 use iced::{Subscription, stream, widget::{Column, button, column, text}};
 
 
@@ -41,6 +41,16 @@ enum Message {
     PwSender(pipewire::channel::Sender<PwMessage>),
     Quit,
 }
+
+impl std::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Self::PwSender(arg0) => f.debug_tuple("PwSender").field(arg0).finish(),
+            Self::PwSender(arg0) => write!(f, "PwSender"),
+            Self::Quit => write!(f, "Quit"),
+        }
+    }
+}
 impl NodeGraph {
     fn view(&self) -> Column<'_, Message> {
         let mut column = Column::new();
@@ -51,7 +61,7 @@ impl NodeGraph {
         column
     }
     fn update(&mut self, message: Message) {
-        println!("received update message");
+        println!("received update message {:?}", message);
         match message {
             Message::PwSender(sender) => self.pipewire_sender = Some(sender),
             Message::Quit => {self.pipewire_sender.as_ref().unwrap().send(PwMessage::Terminate).expect("Failed to send message to pipewire");}
@@ -73,21 +83,16 @@ enum PwMessage {
 
 fn pipewire_subscription(_: &NodeGraph) -> Subscription<Message> {
     Subscription::run(|| stream::channel(100, async |mut output| {
-        let (main_sender, mut main_receiver) = iced::futures::channel::mpsc::channel(256);
         let (pw_sender, pw_receiver) = pipewire::channel::channel();
-
-        let pw_thread = thread::spawn(move || pw_thread(main_sender, pw_receiver).expect("Error running pipewire thread"));
-        println!("created pipewire thread");
 
         let result = output.send(Message::PwSender(pw_sender)).await;
         result.expect("Failed to send sender message");
         println!("sent sender message");
 
-        while let Some(ev) = main_receiver.recv().await.ok() {
-            let _ = output.send(ev);
-        }
+        let pw_thread = tokio::task::spawn_blocking(move || pw_thread(output, pw_receiver).expect("Error running pipewire thread"));
+        println!("created pipewire thread");
 
-        pw_thread.join();
+        pw_thread.await.expect("Failed to wait for pipewire thread completion");
     }))
 }
 
