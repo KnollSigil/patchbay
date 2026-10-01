@@ -1,8 +1,8 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use iced::futures::SinkExt;
+use iced::{Element, futures::SinkExt, widget::Row};
 use pipewire::{context::ContextRc, main_loop::MainLoopRc, types::ObjectType};
-use iced::{Subscription, stream, widget::{Column, button, column, text}};
+use iced::{Subscription, stream, widget::{Column, button, text}};
 
 
 #[derive(Debug, Clone)]
@@ -62,18 +62,35 @@ enum PwUpdate {
     AddNode(Node),
     AddPort(Port),
     AddLink(Link),
-    DeleteNode(u32),
-    DeletePort(u32),
-    DeleteLink(u32),
+    Remove(u32),
 }
 impl NodeGraph {
-    fn view(&self) -> Column<'_, Message> {
+    fn view(&self) -> Element<'_, Message> {
+        let mut row = Row::new();
+
         let mut column = Column::new();
         column = column.push(button("quit").on_press(Message::Quit));
         for (_, node) in &self.nodes {
             column = column.push(text(node.node_name.clone()));
         }
-        column
+        row = row.push(column);
+
+
+        let mut column = Column::new();
+        column = column.push(button("quit").on_press(Message::Quit));
+        for (_, port) in &self.ports {
+            column = column.push(text(port.name.clone()));
+        }
+        row = row.push(column);
+
+        let mut column = Column::new();
+        column = column.push(button("quit").on_press(Message::Quit));
+        for (_, link) in &self.links {
+            column = column.push(text(format!("{} -> {}", link.input_port, link.output_port)));
+        }
+        row = row.push(column);
+
+        row.into()
     }
     fn update(&mut self, message: Message) {
         println!("received update message {:?}", message);
@@ -81,7 +98,20 @@ impl NodeGraph {
             Message::PwSender(sender) => self.pipewire_sender = Some(sender),
             Message::PwUpdate(pw_update) => match pw_update {
                 PwUpdate::AddNode(new_node) => {
-                    println!("Adding node {:?}", new_node);
+                    self.nodes.insert(new_node.id, new_node);
+                }
+                PwUpdate::AddPort(new_port) => {
+                    println!("new port");
+                    self.ports.insert(new_port.id, new_port);
+                }
+                PwUpdate::AddLink(new_link) => {
+                    println!("new link");
+                    self.links.insert(new_link.id, new_link);
+                }
+                PwUpdate::Remove(removal_id) => {
+                    self.nodes.remove(&removal_id);
+                    self.ports.remove(&removal_id);
+                    self.links.remove(&removal_id);
                 }
                 _ => {},
             },
@@ -144,105 +174,109 @@ fn pw_thread(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: 
     let links: RefCell<HashMap<u32, Link>> = RefCell::new(HashMap::new());
 
     let pending = Rc::new(RefCell::new(None));
-    let main_sender = RefCell::new(main_sender);
+    let main_sender = Rc::new(RefCell::new(main_sender));
 
     let core_weak = core.downgrade();
     let global_pending = Rc::downgrade(&pending);
     let _listener = registry
         .add_listener_local()
-        .global(move |global| {
-            let pending = global_pending.upgrade().unwrap();
-            if *pending.borrow() == None {
-                pending.replace(Some(core_weak.upgrade().unwrap().sync(0).expect("sync failed")));
-            }
-            match global.type_ {
-                ObjectType::Node => {
-                    if let Some(props) = global.props {
-                        println!("New node {} {}", global.id, props.get("node.name").unwrap_or(""));
-                        let mut node_name = None;
-                        let mut media_class = None;
-                        let mut application_name = None;
-                        for (key, val) in props.iter() {
-                            match key {
-                                "node.name" => node_name = Some(val.to_string()),
-                                "media.class" => media_class = Some(val.to_string()),
-                                "application.name" => application_name = Some(val.to_string()),
-                                _ => {},
+        .global({
+            let main_sender = main_sender.clone();
+            move |global| {
+                let pending = global_pending.upgrade().unwrap();
+                if *pending.borrow() == None {
+                    pending.replace(Some(core_weak.upgrade().unwrap().sync(0).expect("sync failed")));
+                }
+                match global.type_ {
+                    ObjectType::Node => {
+                        if let Some(props) = global.props {
+                            println!("New node {} {}", global.id, props.get("node.name").unwrap_or(""));
+                            let mut node_name = None;
+                            let mut media_class = None;
+                            let mut application_name = None;
+                            for (key, val) in props.iter() {
+                                match key {
+                                    "node.name" => node_name = Some(val.to_string()),
+                                    "media.class" => media_class = Some(val.to_string()),
+                                    "application.name" => application_name = Some(val.to_string()),
+                                    _ => {},
+                                }
+                            }
+                            if let Some(media_class) = media_class {
+                                main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::AddNode(Node {
+                                    id: global.id,
+                                    node_name: node_name.unwrap(),
+                                    application_name: application_name,
+                                    media_class: media_class,
+                                }))).expect("Failed to send message to main");
                             }
                         }
-                        if let Some(media_class) = media_class {
-                            main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::AddNode(Node {
+                    }
+                    ObjectType::Port => {
+                        if let Some(props) = global.props {
+                            println!("New port {} {}", global.id, props.get("object.path").unwrap_or(""));
+                            let mut port_id = None;
+                            let mut name = None;
+                            let mut direction = None;
+                            let mut format_dsp = None;
+                            let mut group = None;
+                            let mut audio_channel = None;
+                            for (key, val) in props.iter() {
+                                match key {
+                                    "port.id" => port_id = Some(val.to_string()),
+                                    "port.name" => name = Some(val.to_string()),
+                                    "port.direction" => direction = Some(val.to_string()),
+                                    "format.dsp" => format_dsp = Some(val.to_string()),
+                                    "port.group" => group = Some(val.to_string()),
+                                    "audio.channel" => audio_channel = Some(val.to_string()),
+                                    _ => {},
+                                }
+                            }
+                            if let Some(audio_channel) = audio_channel {
+                                main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::AddPort(Port {
+                                    id: global.id,
+                                    port_id: port_id.unwrap(),
+                                    name: name.unwrap(),
+                                    direction: direction.unwrap(),
+                                    format_dsp: format_dsp.unwrap(),
+                                    group: group.unwrap(),
+                                    audio_channel,
+                                }))).expect("Failed to send message to main");
+                            }
+                        }
+                    }
+
+                    // register node -> push to pending_nodes
+                    // register port -> edit pending_nodes
+                    // 
+                    ObjectType::Link => {
+                        println!("New link {}", global.id);
+                        if let Some(props) = global.props {
+                            let mut input_port: Option<u32> = None;
+                            let mut output_port: Option<u32> = None;
+                            for (key, val) in props.iter() {
+                                match key {
+                                    "link.input.port" => input_port = Some(val.parse().unwrap()),
+                                    "link.output.port" => output_port = Some(val.parse().unwrap()),
+                                    _ => {},
+                                }
+                            }
+                            main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::AddLink(Link {
                                 id: global.id,
-                                node_name: node_name.unwrap(),
-                                application_name: application_name,
-                                media_class: media_class,
+                                input_port: input_port.unwrap(),
+                                output_port: output_port.unwrap(),
                             }))).expect("Failed to send message to main");
                         }
                     }
-                }
-                ObjectType::Port => {
-                    if let Some(props) = global.props {
-                        println!("New port {} {}", global.id, props.get("object.path").unwrap_or(""));
-                        let mut port_id = None;
-                        let mut name = None;
-                        let mut direction = None;
-                        let mut format_dsp = None;
-                        let mut group = None;
-                        let mut audio_channel = None;
-                        for (key, val) in props.iter() {
-                            match key {
-                                "port.id" => port_id = Some(val.to_string()),
-                                "port.name" => name = Some(val.to_string()),
-                                "port.direction" => direction = Some(val.to_string()),
-                                "format.dsp" => format_dsp = Some(val.to_string()),
-                                "port.group" => group = Some(val.to_string()),
-                                "audio.channel" => audio_channel = Some(val.to_string()),
-                                _ => {},
-                            }
-                        }
-                        if let Some(audio_channel) = audio_channel {
-                            ports.borrow_mut().insert(global.id, Port {
-                                id: global.id,
-                                port_id: port_id.unwrap(),
-                                name: name.unwrap(),
-                                direction: direction.unwrap(),
-                                format_dsp: format_dsp.unwrap(),
-                                group: group.unwrap(),
-                                audio_channel,
-                            });
-                        }
+                    _ => {
+                        // println!("New global: {:#?}", global);
                     }
-                }
-
-                // register node -> push to pending_nodes
-                // register port -> edit pending_nodes
-                // 
-                ObjectType::Link => {
-                    println!("New link {}", global.id);
-                    if let Some(props) = global.props {
-                        let mut input_port: Option<u32> = None;
-                        let mut output_port: Option<u32> = None;
-                        for (key, val) in props.iter() {
-                            match key {
-                                "link.input.port" => input_port = Some(val.parse().unwrap()),
-                                "link.output.port" => output_port = Some(val.parse().unwrap()),
-                                _ => {},
-                            }
-                        }
-                        links.borrow_mut().insert(global.id, Link {
-                            id: global.id,
-                            input_port: input_port.unwrap(),
-                            output_port: output_port.unwrap(),
-                        });
-                    }
-                }
-                _ => {
-                    // println!("New global: {:#?}", global);
                 }
             }
         })
         .global_remove({
             let global_pending = Rc::downgrade(&pending);
+            let main_sender = main_sender.clone();
             let core_weak = core.downgrade();
             move |global| {
             println!("remove global: {}", global);
@@ -251,6 +285,8 @@ fn pw_thread(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: 
                 pending.replace(Some(core_weak.upgrade().unwrap().sync(0).expect("sync failed")));
                 println!("New pending destroyed: {}", pending.borrow().unwrap().seq());
             }
+            main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::Remove(global)))
+                .expect("Failed to send message to main");
         }})
         .register();
 
