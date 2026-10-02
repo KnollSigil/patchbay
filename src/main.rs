@@ -1,8 +1,10 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use iced::{Element, futures::SinkExt, widget::Row};
+use iced_futures::core::Widget;
 use pipewire::{context::ContextRc, main_loop::MainLoopRc, types::ObjectType};
-use iced::{Subscription, stream, widget::{Column, button, text}};
+use iced::{Subscription, stream, widget::{Column, column, button, text, Text}};
+use iced_aw::{helpers::card, style};
 
 
 #[derive(Debug, Clone)]
@@ -17,6 +19,7 @@ struct Node {
 #[derive(Debug, Clone)]
 struct Port {
     id: u32,
+    node_id: u32,
     port_id: String,
     name: String,
     direction: String,
@@ -66,31 +69,29 @@ enum PwUpdate {
 }
 impl NodeGraph {
     fn view(&self) -> Element<'_, Message> {
-        let mut row = Row::new();
-
         let mut column = Column::new();
-        column = column.push(button("quit").on_press(Message::Quit));
-        for (_, node) in &self.nodes {
-            column = column.push(text(node.node_name.clone()));
-        }
-        row = row.push(column);
 
-
-        let mut column = Column::new();
-        column = column.push(button("quit").on_press(Message::Quit));
+        let mut ports_for_nodes: HashMap<u32, Vec<u32>> = HashMap::new();
         for (_, port) in &self.ports {
-            column = column.push(text(port.name.clone()));
+            let port_list = ports_for_nodes.entry(port.node_id).or_default();
+            port_list.push(port.id);
         }
-        row = row.push(column);
 
-        let mut column = Column::new();
-        column = column.push(button("quit").on_press(Message::Quit));
-        for (_, link) in &self.links {
-            column = column.push(text(format!("{} -> {}", link.input_port, link.output_port)));
+
+        // TODO: loop in ordered fashion instead of just iterate through hashmap directly
+        for (_, node) in &self.nodes {
+            let mut port_column = Column::new();
+            for port in ports_for_nodes.get(&node.id).unwrap_or(&Vec::new()) {
+                let port = self.ports.get(port).unwrap();
+                port_column = port_column.push(Text::new(format!("{} {}", port.name, port.direction)))
+            }
+            column = column.push(card(
+                Text::new(node.node_name.clone()),
+                    port_column,
+            )
+            .style(style::card::primary));
         }
-        row = row.push(column);
-
-        row.into()
+        column.spacing(8).into()
     }
     fn update(&mut self, message: Message) {
         println!("received update message {:?}", message);
@@ -215,6 +216,7 @@ fn pw_thread(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: 
                     ObjectType::Port => {
                         if let Some(props) = global.props {
                             println!("New port {} {}", global.id, props.get("object.path").unwrap_or(""));
+                            let mut node_id = None;
                             let mut port_id = None;
                             let mut name = None;
                             let mut direction = None;
@@ -223,6 +225,7 @@ fn pw_thread(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: 
                             let mut audio_channel = None;
                             for (key, val) in props.iter() {
                                 match key {
+                                    "node.id" => node_id = Some(val.parse::<u32>().unwrap()),
                                     "port.id" => port_id = Some(val.to_string()),
                                     "port.name" => name = Some(val.to_string()),
                                     "port.direction" => direction = Some(val.to_string()),
@@ -235,6 +238,7 @@ fn pw_thread(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: 
                             if let Some(audio_channel) = audio_channel {
                                 main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::AddPort(Port {
                                     id: global.id,
+                                    node_id: node_id.unwrap(),
                                     port_id: port_id.unwrap(),
                                     name: name.unwrap(),
                                     direction: direction.unwrap(),
