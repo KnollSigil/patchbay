@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use iced::{Element, futures::SinkExt, widget::Row};
+use iced::{Element, futures::SinkExt, widget::{Row, scrollable}};
 use iced_futures::core::Widget;
 use pipewire::{context::ContextRc, main_loop::MainLoopRc, types::ObjectType};
 use iced::{Subscription, stream, widget::{Column, column, button, text, Text}};
@@ -91,7 +91,7 @@ impl NodeGraph {
             )
             .style(style::card::primary));
         }
-        column.spacing(8).into()
+        scrollable(column.spacing(8)).into()
     }
     fn update(&mut self, message: Message) {
         println!("received update message {:?}", message);
