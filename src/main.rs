@@ -1,7 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use iced::{Element, futures::SinkExt, widget::{Row, scrollable}};
-use iced_futures::core::Widget;
+use iced::{Element, Font, futures::SinkExt, widget::{Row, row, scrollable}};
+use iced_futures::core::{Widget, font};
 use pipewire::{context::ContextRc, main_loop::MainLoopRc, types::ObjectType};
 use iced::{Subscription, stream, widget::{Column, column, button, text, Text}};
 use iced_aw::{helpers::card, style};
@@ -77,6 +77,13 @@ impl NodeGraph {
             port_list.push(port.id);
         }
 
+        let mut links_for_ports: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (_, link) in &self.links {
+            for link_port in [link.input_port, link.output_port] {
+                let link_list = links_for_ports.entry(link_port).or_default();
+                link_list.push(link.id);
+            }
+        }
 
         // TODO: loop in ordered fashion instead of just iterate through hashmap directly
         for (_, node) in &self.nodes {
@@ -85,9 +92,47 @@ impl NodeGraph {
                 let port = self.ports.get(port).unwrap();
                 port_column = port_column.push(Text::new(format!("{} {}", port.name, port.direction)))
             }
+
+            let bold_font = Font {
+                weight: font::Weight::Bold,
+                ..Font::default()
+            };
+
+            let mut input_link_column = Column::new();
+            input_link_column = input_link_column.push(Text::new("Input Links").font(bold_font));
+            for port in ports_for_nodes.get(&node.id).unwrap_or(&Vec::new()) {
+                let port = self.ports.get(port).unwrap();
+                if port.direction.eq("in") {
+                    for link in links_for_ports.get(&port.id).unwrap_or(&Vec::new()) {
+                        let link = self.links.get(link).unwrap();
+                        let incoming_port = self.ports.get(&link.output_port).unwrap();
+                        let incoming_node = self.nodes.get(&incoming_port.node_id).unwrap();
+                        input_link_column = input_link_column.push(Text::new(
+                            format!("{}: {}->{}", incoming_node.node_name, incoming_port.name, port.name)
+                        ));
+                    }
+                }
+            }
+
+            let mut output_link_column = Column::new();
+            output_link_column = output_link_column.push(Text::new("Output Links").font(bold_font));
+            for port in ports_for_nodes.get(&node.id).unwrap_or(&Vec::new()) {
+                let port = self.ports.get(port).unwrap();
+                if port.direction.eq("out") {
+                    for link in links_for_ports.get(&port.id).unwrap_or(&Vec::new()) {
+                        let link = self.links.get(link).unwrap();
+                        let outgoing_port = self.ports.get(&link.input_port).unwrap();
+                        let outgoing_node = self.nodes.get(&outgoing_port.node_id).unwrap();
+                        output_link_column = output_link_column.push(Text::new(
+                            format!("{}: {}->{}", outgoing_node.node_name, port.name, outgoing_port.name)
+                        ));
+                    }
+                }
+            }
+
             column = column.push(card(
                 Text::new(node.node_name.clone()),
-                    port_column,
+                    row!(port_column, input_link_column, output_link_column).spacing(24),
             )
             .style(style::card::primary));
         }
