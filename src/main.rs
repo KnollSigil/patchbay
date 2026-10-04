@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::{BTreeMap, BTreeSet, HashMap}, rc::Rc};
 
 use iced::{Element, Font, futures::SinkExt, widget::{Row, row, scrollable}};
 use iced_futures::core::{Widget, font};
@@ -98,36 +98,56 @@ impl NodeGraph {
                 ..Font::default()
             };
 
-            let mut input_link_column = Column::new();
-            input_link_column = input_link_column.push(Text::new("Input Links").font(bold_font));
+            
+            let mut incoming_nodes = BTreeMap::new();
+            let mut outgoing_nodes = BTreeMap::new();
             for port in ports_for_nodes.get(&node.id).unwrap_or(&Vec::new()) {
                 let port = self.ports.get(port).unwrap();
-                if port.direction.eq("in") {
-                    for link in links_for_ports.get(&port.id).unwrap_or(&Vec::new()) {
-                        let link = self.links.get(link).unwrap();
+                for link in links_for_ports.get(&port.id).unwrap_or(&Vec::new()) {
+                    let link = self.links.get(link).unwrap();
+                    if port.direction.eq("in") {
                         let incoming_port = self.ports.get(&link.output_port).unwrap();
-                        let incoming_node = self.nodes.get(&incoming_port.node_id).unwrap();
-                        input_link_column = input_link_column.push(Text::new(
-                            format!("{}: {}->{}", incoming_node.node_name, incoming_port.name, port.name)
-                        ));
+                        let links_for_incoming_node: &mut Vec<u32> = incoming_nodes.entry(incoming_port.node_id).or_default();
+                        links_for_incoming_node.push(link.id);
+                    }
+                    if port.direction.eq("out") {
+                        let outgoing_port = self.ports.get(&link.input_port).unwrap();
+                        let links_for_outgoing_node: &mut Vec<u32> = outgoing_nodes.entry(outgoing_port.node_id).or_default();
+                        links_for_outgoing_node.push(link.id);
                     }
                 }
             }
 
+            let mut input_link_column = Column::new();
+            input_link_column = input_link_column.push(Text::new("Input Links").font(bold_font));
+            for (incoming_node, mut links_for_incoming_node) in incoming_nodes {
+                let mut incoming_node_row = Row::new();
+                let incoming_node = self.nodes.get(&incoming_node).unwrap();
+                incoming_node_row = incoming_node_row.push(Text::new(incoming_node.node_name.clone()));
+                links_for_incoming_node.sort();
+                for link in links_for_incoming_node {
+                    let link = self.links.get(&link).unwrap();
+                    let output_channel = self.ports.get(&link.output_port).unwrap().audio_channel.clone();
+                    let input_channel = self.ports.get(&link.input_port).unwrap().audio_channel.clone();
+                    incoming_node_row = incoming_node_row.push(Text::new(format!("|{}->{}", output_channel, input_channel)));
+                }
+                input_link_column = input_link_column.push(incoming_node_row);
+            }
+
             let mut output_link_column = Column::new();
             output_link_column = output_link_column.push(Text::new("Output Links").font(bold_font));
-            for port in ports_for_nodes.get(&node.id).unwrap_or(&Vec::new()) {
-                let port = self.ports.get(port).unwrap();
-                if port.direction.eq("out") {
-                    for link in links_for_ports.get(&port.id).unwrap_or(&Vec::new()) {
-                        let link = self.links.get(link).unwrap();
-                        let outgoing_port = self.ports.get(&link.input_port).unwrap();
-                        let outgoing_node = self.nodes.get(&outgoing_port.node_id).unwrap();
-                        output_link_column = output_link_column.push(Text::new(
-                            format!("{}: {}->{}", outgoing_node.node_name, port.name, outgoing_port.name)
-                        ));
-                    }
+            for (outgoing_node, mut links_for_outgoing_node) in outgoing_nodes {
+                let mut outgoing_node_row = Row::new();
+                let outgoing_node = self.nodes.get(&outgoing_node).unwrap();
+                outgoing_node_row = outgoing_node_row.push(Text::new(outgoing_node.node_name.clone()));
+                links_for_outgoing_node.sort();
+                for link in links_for_outgoing_node {
+                    let link = self.links.get(&link).unwrap();
+                    let output_channel = self.ports.get(&link.output_port).unwrap().audio_channel.clone();
+                    let input_channel = self.ports.get(&link.input_port).unwrap().audio_channel.clone();
+                    outgoing_node_row = outgoing_node_row.push(Text::new(format!("|{}->{}", output_channel, input_channel)));
                 }
+                output_link_column = output_link_column.push(outgoing_node_row);
             }
 
             column = column.push(card(
