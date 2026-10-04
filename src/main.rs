@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::{BTreeMap, BTreeSet, HashMap}, rc::Rc};
 
-use iced::{Element, Font, futures::SinkExt, widget::{Row, row, scrollable}};
+use iced::{Element, Font, Length, futures::SinkExt, widget::{Row, row, rule, scrollable}};
 use iced_futures::core::{Widget, font};
 use pipewire::{context::ContextRc, main_loop::MainLoopRc, types::ObjectType};
 use iced::{Subscription, stream, widget::{Column, column, button, text, Text}};
@@ -77,6 +77,14 @@ impl NodeGraph {
             port_list.push(port.id);
         }
 
+        for (_, mut ports) in &mut ports_for_nodes {
+            ports.sort_by(|a, b| {
+                let a = self.ports.get(a).unwrap();
+                let b = self.ports.get(b).unwrap();
+                a.port_id.cmp(&b.port_id)
+            })
+        }
+
         let mut links_for_ports: HashMap<u32, Vec<u32>> = HashMap::new();
         for (_, link) in &self.links {
             for link_port in [link.input_port, link.output_port] {
@@ -120,17 +128,88 @@ impl NodeGraph {
 
             let mut input_link_column = Column::new();
             input_link_column = input_link_column.push(Text::new("Input Links").font(bold_font));
+
+            // let channel_spacing = 2.0;
+            // let channel_width = 5.0;
+            // let mut audio_table = Column::new().width(iced::Shrink).spacing(channel_spacing).padding(channel_spacing);
+
+            // audio_table = audio_table.push(
+            //     iced::widget::row!(
+            //         iced::widget::container(iced::widget::space())
+            //             .width(Length::Fixed(channel_width))
+            //             .height(Length::Fixed(channel_width))
+            //             .style(|_theme| iced::widget::container::background(iced::Background::Color(iced::color!(0, 255, 0)))),
+            //         iced::widget::container(iced::widget::space())
+            //             .width(Length::Fixed(channel_width))
+            //             .height(Length::Fixed(channel_width))
+            //             .style(|_theme| iced::widget::container::background(iced::Background::Color(iced::Color::WHITE)))
+            //     ).spacing(channel_spacing)
+            // );
+            // audio_table = audio_table.push(
+            //     iced::widget::row!(
+            //         iced::widget::container(iced::widget::space())
+            //             .width(Length::Fixed(channel_width))
+            //             .height(Length::Fixed(channel_width))
+            //             .style(|_theme| iced::widget::container::background(iced::Background::Color(iced::Color::WHITE))),
+            //         iced::widget::container(iced::widget::space())
+            //             .width(Length::Fixed(channel_width))
+            //             .height(Length::Fixed(channel_width))
+            //             .style(|_theme| iced::widget::container::background(iced::Background::Color(iced::color!(0, 255, 0))))
+            //     ).spacing(channel_spacing)
+            // );
+
+
+            // let audio_container = iced::widget::Container::new(audio_table).style(|theme| iced::widget::container::Style {
+            //     background: Some(iced::Background::Color(iced::Color::BLACK)),
+            //     ..iced::widget::container::Style::default()
+            // });
+            // input_link_column = input_link_column.push(audio_container);
+
             for (incoming_node, mut links_for_incoming_node) in incoming_nodes {
                 let mut incoming_node_row = Row::new();
                 let incoming_node = self.nodes.get(&incoming_node).unwrap();
                 incoming_node_row = incoming_node_row.push(Text::new(incoming_node.node_name.clone()));
-                links_for_incoming_node.sort();
-                for link in links_for_incoming_node {
-                    let link = self.links.get(&link).unwrap();
-                    let output_channel = self.ports.get(&link.output_port).unwrap().audio_channel.clone();
-                    let input_channel = self.ports.get(&link.input_port).unwrap().audio_channel.clone();
-                    incoming_node_row = incoming_node_row.push(Text::new(format!("|{}->{}", output_channel, input_channel)));
+
+                let channel_spacing = 2.0;
+                let channel_width = 5.0;
+                let mut audio_table = Column::new().width(iced::Shrink).spacing(channel_spacing).padding(channel_spacing);
+
+                for output_port in ports_for_nodes.get(&incoming_node.id).unwrap() {
+                    let output_port = self.ports.get(output_port).unwrap();
+                    if !output_port.direction.eq("out") {
+                        continue;
+                    }
+                    let mut connected_input_ports = Vec::new();
+                    for link in &links_for_incoming_node {
+                        let link = self.links.get(link).unwrap();
+                        if link.output_port == output_port.id {
+                            connected_input_ports.push(link.input_port);
+                        }
+                    }
+                    let mut output_port_row = Row::new().spacing(channel_spacing);
+                    for input_port in ports_for_nodes.get(&node.id).unwrap() {
+                        let input_port = self.ports.get(input_port).unwrap();
+                        if !input_port.direction.eq("in") { continue; }
+                        let color = if connected_input_ports.contains(&input_port.id) {
+                            iced::color!(0, 255, 0)
+                        } else {
+                            iced::Color::WHITE
+                        };
+                        output_port_row = output_port_row.push(
+                            iced::widget::container(iced::widget::space())
+                                .width(Length::Fixed(channel_width))
+                                .height(Length::Fixed(channel_width))
+                                .style(move |_theme| iced::widget::container::background(iced::Background::Color(color)))
+                        )
+                    }
+                    audio_table = audio_table.push(output_port_row);
                 }
+
+                let audio_container = iced::widget::Container::new(audio_table).style(|theme| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::BLACK)),
+                    ..iced::widget::container::Style::default()
+                });
+                incoming_node_row = incoming_node_row.push(audio_container);
                 input_link_column = input_link_column.push(incoming_node_row);
             }
 
@@ -140,13 +219,47 @@ impl NodeGraph {
                 let mut outgoing_node_row = Row::new();
                 let outgoing_node = self.nodes.get(&outgoing_node).unwrap();
                 outgoing_node_row = outgoing_node_row.push(Text::new(outgoing_node.node_name.clone()));
-                links_for_outgoing_node.sort();
-                for link in links_for_outgoing_node {
-                    let link = self.links.get(&link).unwrap();
-                    let output_channel = self.ports.get(&link.output_port).unwrap().audio_channel.clone();
-                    let input_channel = self.ports.get(&link.input_port).unwrap().audio_channel.clone();
-                    outgoing_node_row = outgoing_node_row.push(Text::new(format!("|{}->{}", output_channel, input_channel)));
+                
+                let channel_spacing = 2.0;
+                let channel_width = 5.0;
+                let mut audio_table = Column::new().width(iced::Shrink).spacing(channel_spacing).padding(channel_spacing);
+
+                for output_port in ports_for_nodes.get(&node.id).unwrap() {
+                    let output_port = self.ports.get(output_port).unwrap();
+                    if !output_port.direction.eq("out") {
+                        continue;
+                    }
+                    let mut connected_input_ports = Vec::new();
+                    for link in &links_for_outgoing_node {
+                        let link = self.links.get(link).unwrap();
+                        if link.output_port == output_port.id {
+                            connected_input_ports.push(link.input_port);
+                        }
+                    }
+                    let mut output_port_row = Row::new().spacing(channel_spacing);
+                    for input_port in ports_for_nodes.get(&outgoing_node.id).unwrap() {
+                        let input_port = self.ports.get(input_port).unwrap();
+                        if !input_port.direction.eq("in") { continue; }
+                        let color = if connected_input_ports.contains(&input_port.id) {
+                            iced::color!(0, 255, 0)
+                        } else {
+                            iced::Color::WHITE
+                        };
+                        output_port_row = output_port_row.push(
+                            iced::widget::container(iced::widget::space())
+                                .width(Length::Fixed(channel_width))
+                                .height(Length::Fixed(channel_width))
+                                .style(move |_theme| iced::widget::container::background(iced::Background::Color(color)))
+                        )
+                    }
+                    audio_table = audio_table.push(output_port_row);
                 }
+
+                let audio_container = iced::widget::Container::new(audio_table).style(|theme| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::BLACK)),
+                    ..iced::widget::container::Style::default()
+                });
+                outgoing_node_row = outgoing_node_row.push(audio_container);
                 output_link_column = output_link_column.push(outgoing_node_row);
             }
 
