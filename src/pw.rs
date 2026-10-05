@@ -5,6 +5,7 @@ use pipewire::{context::ContextRc, main_loop::MainLoopRc, types::ObjectType};
 use crate::{Message, PwMessage, PwUpdate};
 
 #[derive(Debug, Clone)]
+#[allow(unused)]
 pub struct Node {
     pub id: u32,
     // serial instead of id
@@ -14,6 +15,7 @@ pub struct Node {
 }
 
 #[derive(Debug, Clone)]
+#[allow(unused)]
 pub struct Port {
     pub id: u32,
     pub node_id: u32,
@@ -32,7 +34,7 @@ pub struct Link {
     pub output_port: u32,
 }
 
-pub fn run(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewire::channel::Receiver<PwMessage>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewire::channel::Receiver<PwMessage>) -> Result<(), Box<dyn std::error::Error>> {
     let mainloop = MainLoopRc::new(None)?;
     let context = ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
@@ -108,7 +110,7 @@ pub fn run(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pi
                                     direction: direction.unwrap(),
                                     format_dsp: format_dsp.unwrap(),
                                     group: group.unwrap(),
-                                    audio_channel,
+                                    audio_channel: audio_channel,
                                 }))).expect("Failed to send message to main");
                             }
                         }
@@ -171,7 +173,7 @@ pub fn run(mut main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pi
             }
         })
         .register();
-    let attchrcv = pw_receiver.attach(mainloop.loop_(), {
+    let _attchrcv = pw_receiver.attach(mainloop.loop_(), {
         let mainloop = mainloop.clone();
         move |_| {
             println!("got a PwMessage message");

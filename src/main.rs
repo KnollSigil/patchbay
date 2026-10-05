@@ -16,6 +16,7 @@ struct NodeGraph {
 }
 
 #[derive(Clone)]
+#[allow(unused)]
 enum Message {
     PwSender(pipewire::channel::Sender<PwMessage>),
     PwUpdate(PwUpdate),
@@ -50,7 +51,7 @@ impl NodeGraph {
             port_list.push(port.id);
         }
 
-        for (_, mut ports) in &mut ports_for_nodes {
+        for (_, ports) in &mut ports_for_nodes {
             ports.sort_by(|a, b| {
                 let a = self.ports.get(a).unwrap();
                 let b = self.ports.get(b).unwrap();
@@ -102,7 +103,7 @@ impl NodeGraph {
             let mut input_link_column = Column::new();
             input_link_column = input_link_column.push(Text::new("Input Links").font(bold_font));
 
-            for (incoming_node, mut links_for_incoming_node) in incoming_nodes {
+            for (incoming_node, links_for_incoming_node) in incoming_nodes {
                 let mut incoming_node_row = Row::new();
                 let incoming_node = self.nodes.get(&incoming_node).unwrap();
                 incoming_node_row = incoming_node_row.push(Text::new(incoming_node.node_name.clone()));
@@ -142,7 +143,7 @@ impl NodeGraph {
                     audio_table = audio_table.push(output_port_row);
                 }
 
-                let audio_container = iced::widget::Container::new(audio_table).style(|theme| iced::widget::container::Style {
+                let audio_container = iced::widget::Container::new(audio_table).style(|_theme| iced::widget::container::Style {
                     background: Some(iced::Background::Color(iced::Color::BLACK)),
                     ..iced::widget::container::Style::default()
                 });
@@ -152,7 +153,7 @@ impl NodeGraph {
 
             let mut output_link_column = Column::new();
             output_link_column = output_link_column.push(Text::new("Output Links").font(bold_font));
-            for (outgoing_node, mut links_for_outgoing_node) in outgoing_nodes {
+            for (outgoing_node, links_for_outgoing_node) in outgoing_nodes {
                 let mut outgoing_node_row = Row::new();
                 let outgoing_node = self.nodes.get(&outgoing_node).unwrap();
                 outgoing_node_row = outgoing_node_row.push(Text::new(outgoing_node.node_name.clone()));
@@ -192,7 +193,7 @@ impl NodeGraph {
                     audio_table = audio_table.push(output_port_row);
                 }
 
-                let audio_container = iced::widget::Container::new(audio_table).style(|theme| iced::widget::container::Style {
+                let audio_container = iced::widget::Container::new(audio_table).style(|_theme| iced::widget::container::Style {
                     background: Some(iced::Background::Color(iced::Color::BLACK)),
                     ..iced::widget::container::Style::default()
                 });
@@ -229,10 +230,8 @@ impl NodeGraph {
                     self.ports.remove(&removal_id);
                     self.links.remove(&removal_id);
                 }
-                _ => {},
             },
             Message::Quit => {self.pipewire_sender.as_ref().unwrap().send(PwMessage::Terminate).expect("Failed to send message to pipewire");}
-            _ => ()
         }
     }
 }
