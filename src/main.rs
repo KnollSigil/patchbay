@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use iced::{Element, Font, Length, futures::SinkExt, widget::{Row, row, scrollable}};
+use iced::{Element, Font, Length, futures::SinkExt, widget::{Row, button, row, scrollable}};
 use iced_futures::core::font;
 use iced::{Subscription, stream, widget::{Column, Text}};
 use iced_aw::{helpers::card, style};
@@ -9,10 +9,17 @@ mod pw;
 
 
 struct NodeGraph {
-    nodes: HashMap<u32, pw::Node>,
+    nodes: HashMap<u32, Node>,
     ports: HashMap<u32, pw::Port>,
     links: HashMap<u32, pw::Link>,
     pipewire_sender: Option<pipewire::channel::Sender<PwMessage>>,
+    selected_node: Option<u32>,
+}
+
+struct Node {
+    pw_node: pw::Node,
+    pw_state: Option<pw::NodeState>,
+    pw_props: Option<pw::NodeProps>,
 }
 
 #[derive(Clone)]
@@ -20,7 +27,13 @@ struct NodeGraph {
 enum Message {
     PwSender(pipewire::channel::Sender<PwMessage>),
     PwUpdate(PwUpdate),
+    UiAction(UiAction),
     Quit,
+}
+
+#[derive(Debug, Clone)]
+enum UiAction {
+    SelectedNode(u32),
 }
 
 impl std::fmt::Debug for Message {
@@ -29,6 +42,7 @@ impl std::fmt::Debug for Message {
             // Self::PwSender(arg0) => f.debug_tuple("PwSender").field(arg0).finish(),
             Self::PwSender(_) => write!(f, "PwSender"),
             Self::PwUpdate(arg0) => f.debug_tuple("PwUpdate").field(arg0).finish(),
+            Self::UiAction(arg0) => f.debug_tuple("UiAction").field(arg0).finish(),
             Self::Quit => write!(f, "Quit"),
         }
     }
@@ -37,6 +51,7 @@ impl std::fmt::Debug for Message {
 #[derive(Debug, Clone)]
 enum PwUpdate {
     AddNode(pw::Node),
+    NodeInfo(pw::NodeInfo),
     AddPort(pw::Port),
     AddLink(pw::Link),
     Remove(u32),
@@ -51,6 +66,7 @@ impl NodeGraph {
             port_list.push(port.id);
         }
 
+        // TODO: sorting by global.id or port.id are not reliable
         for (_, ports) in &mut ports_for_nodes {
             ports.sort_by(|a, b| {
                 let a = self.ports.get(a).unwrap();
@@ -70,9 +86,9 @@ impl NodeGraph {
         // TODO: loop in ordered fashion instead of just iterate through hashmap directly
         for (_, node) in &self.nodes {
             let mut port_column = Column::new();
-            for port in ports_for_nodes.get(&node.id).unwrap_or(&Vec::new()) {
+            for port in ports_for_nodes.get(&node.pw_node.id).unwrap_or(&Vec::new()) {
                 let port = self.ports.get(port).unwrap();
-                port_column = port_column.push(Text::new(format!("{} {}", port.name, port.direction)))
+                port_column = port_column.push(Text::new(format!("{} {}", port.port_name, port.port_direction)))
             }
 
             let bold_font = Font {
@@ -83,16 +99,16 @@ impl NodeGraph {
             
             let mut incoming_nodes = BTreeMap::new();
             let mut outgoing_nodes = BTreeMap::new();
-            for port in ports_for_nodes.get(&node.id).unwrap_or(&Vec::new()) {
+            for port in ports_for_nodes.get(&node.pw_node.id).unwrap_or(&Vec::new()) {
                 let port = self.ports.get(port).unwrap();
                 for link in links_for_ports.get(&port.id).unwrap_or(&Vec::new()) {
                     let link = self.links.get(link).unwrap();
-                    if port.direction.eq("in") {
+                    if port.port_direction.eq("in") {
                         let incoming_port = self.ports.get(&link.output_port).unwrap();
                         let links_for_incoming_node: &mut Vec<u32> = incoming_nodes.entry(incoming_port.node_id).or_default();
                         links_for_incoming_node.push(link.id);
                     }
-                    if port.direction.eq("out") {
+                    if port.port_direction.eq("out") {
                         let outgoing_port = self.ports.get(&link.input_port).unwrap();
                         let links_for_outgoing_node: &mut Vec<u32> = outgoing_nodes.entry(outgoing_port.node_id).or_default();
                         links_for_outgoing_node.push(link.id);
@@ -106,15 +122,15 @@ impl NodeGraph {
             for (incoming_node, links_for_incoming_node) in incoming_nodes {
                 let mut incoming_node_row = Row::new();
                 let incoming_node = self.nodes.get(&incoming_node).unwrap();
-                incoming_node_row = incoming_node_row.push(Text::new(incoming_node.node_name.clone()));
+                incoming_node_row = incoming_node_row.push(Text::new(incoming_node.pw_node.node_name.clone()));
 
                 let channel_spacing = 2.0;
                 let channel_width = 5.0;
                 let mut audio_table = Column::new().width(iced::Shrink).spacing(channel_spacing).padding(channel_spacing);
 
-                for output_port in ports_for_nodes.get(&incoming_node.id).unwrap() {
+                for output_port in ports_for_nodes.get(&incoming_node.pw_node.id).unwrap() {
                     let output_port = self.ports.get(output_port).unwrap();
-                    if !output_port.direction.eq("out") {
+                    if !output_port.port_direction.eq("out") {
                         continue;
                     }
                     let mut connected_input_ports = Vec::new();
@@ -125,9 +141,9 @@ impl NodeGraph {
                         }
                     }
                     let mut output_port_row = Row::new().spacing(channel_spacing);
-                    for input_port in ports_for_nodes.get(&node.id).unwrap() {
+                    for input_port in ports_for_nodes.get(&node.pw_node.id).unwrap() {
                         let input_port = self.ports.get(input_port).unwrap();
-                        if !input_port.direction.eq("in") { continue; }
+                        if !input_port.port_direction.eq("in") { continue; }
                         let color = if connected_input_ports.contains(&input_port.id) {
                             iced::color!(0, 255, 0)
                         } else {
@@ -156,15 +172,15 @@ impl NodeGraph {
             for (outgoing_node, links_for_outgoing_node) in outgoing_nodes {
                 let mut outgoing_node_row = Row::new();
                 let outgoing_node = self.nodes.get(&outgoing_node).unwrap();
-                outgoing_node_row = outgoing_node_row.push(Text::new(outgoing_node.node_name.clone()));
+                outgoing_node_row = outgoing_node_row.push(Text::new(outgoing_node.pw_node.node_name.clone()));
                 
                 let channel_spacing = 2.0;
                 let channel_width = 5.0;
                 let mut audio_table = Column::new().width(iced::Shrink).spacing(channel_spacing).padding(channel_spacing);
 
-                for output_port in ports_for_nodes.get(&node.id).unwrap() {
+                for output_port in ports_for_nodes.get(&node.pw_node.id).unwrap() {
                     let output_port = self.ports.get(output_port).unwrap();
-                    if !output_port.direction.eq("out") {
+                    if !output_port.port_direction.eq("out") {
                         continue;
                     }
                     let mut connected_input_ports = Vec::new();
@@ -175,9 +191,9 @@ impl NodeGraph {
                         }
                     }
                     let mut output_port_row = Row::new().spacing(channel_spacing);
-                    for input_port in ports_for_nodes.get(&outgoing_node.id).unwrap() {
+                    for input_port in ports_for_nodes.get(&outgoing_node.pw_node.id).unwrap() {
                         let input_port = self.ports.get(input_port).unwrap();
-                        if !input_port.direction.eq("in") { continue; }
+                        if !input_port.port_direction.eq("in") { continue; }
                         let color = if connected_input_ports.contains(&input_port.id) {
                             iced::color!(0, 255, 0)
                         } else {
@@ -201,36 +217,90 @@ impl NodeGraph {
                 output_link_column = output_link_column.push(outgoing_node_row);
             }
 
-            column = column.push(card(
-                Text::new(node.node_name.clone()),
-                    row!(port_column, input_link_column, output_link_column).spacing(24),
-            )
-            .style(style::card::primary));
+            column = column.push(
+                button(
+                    card(
+                    Text::new(node.pw_node.node_name.clone()),
+                        row!(port_column, input_link_column, output_link_column).spacing(24),
+                    ).style(style::card::primary)
+                ).on_press(Message::UiAction(UiAction::SelectedNode(node.pw_node.id)))
+                .padding(0)
+            );
         }
-        scrollable(column.spacing(8)).into()
+        let mut node_info_col = Column::new();
+        if let Some(selected_node) = self.selected_node {
+            let selected_node = self.nodes.get(&selected_node).unwrap();
+
+            // pw::Node
+            node_info_col = node_info_col.push(Text::new(format!("id: {}", selected_node.pw_node.id)));
+            node_info_col = node_info_col.push(Text::new(format!("object_serial: {}", selected_node.pw_node.object_serial)));
+            node_info_col = node_info_col.push(Text::new(format!("node.name: {}", selected_node.pw_node.node_name)));
+            node_info_col = node_info_col.push(Text::new(format!("application.name: {:?}", selected_node.pw_node.application_name)));
+            node_info_col = node_info_col.push(Text::new(format!("media.class: {:?}", selected_node.pw_node.media_class)));
+            node_info_col = node_info_col.push(Text::new(format!("media.class: {:?}", selected_node.pw_node.media_type)));
+            node_info_col = node_info_col.push(Text::new(format!("media.class: {:?}", selected_node.pw_node.media_category)));
+            node_info_col = node_info_col.push(Text::new(format!("media.role: {:?}", selected_node.pw_node.media_role)));
+            node_info_col = node_info_col.push(Text::new(format!("client.api: {:?}", selected_node.pw_node.client_api)));
+
+            // pw::NodeState
+            node_info_col = node_info_col.push(Text::new(format!("state: {:?}", selected_node.pw_state)));
+
+            // pw::NodeProps
+            if let Some(props) = &selected_node.pw_props {
+                let mut sorted_props: Vec<(&String, &String)> = props.iter().collect();
+                sorted_props.sort();
+                for (prop_key, prop_value) in sorted_props {
+                    node_info_col = node_info_col.push(Text::new(format!("prop {}: {}", prop_key, prop_value)));
+                }
+            }
+        } else {
+            node_info_col = node_info_col.push(Text::new("No selected node"));
+        }
+        row!(scrollable(column.spacing(8)).width(Length::Fill), scrollable(node_info_col).width(Length::Fill)).into()
     }
     fn update(&mut self, message: Message) {
-        println!("received update message {:?}", message);
+        // println!("received update message {:?}", message);
         match message {
             Message::PwSender(sender) => self.pipewire_sender = Some(sender),
             Message::PwUpdate(pw_update) => match pw_update {
                 PwUpdate::AddNode(new_node) => {
-                    self.nodes.insert(new_node.id, new_node);
+                    self.nodes.insert(new_node.id, Node {
+                        pw_node: new_node,
+                        pw_state: None,
+                        pw_props: None,
+                    });
+                }
+                PwUpdate::NodeInfo(info) => {
+                    if let Some(state) = info.state {
+                        if let pw::NodeState::Error(error_string) = &state {
+                            println!("Node error on {}: {}", info.id, error_string);
+                        }
+                        self.nodes.get_mut(&info.id).unwrap().pw_state = Some(state);
+                    }
+                    if let Some(props) = info.props {
+                        self.nodes.get_mut(&info.id).unwrap().pw_props = Some(props);
+                    }
                 }
                 PwUpdate::AddPort(new_port) => {
-                    println!("new port");
                     self.ports.insert(new_port.id, new_port);
                 }
                 PwUpdate::AddLink(new_link) => {
-                    println!("new link");
                     self.links.insert(new_link.id, new_link);
                 }
                 PwUpdate::Remove(removal_id) => {
                     self.nodes.remove(&removal_id);
                     self.ports.remove(&removal_id);
                     self.links.remove(&removal_id);
+                    if let Some(selected_node) = self.selected_node && selected_node == removal_id {
+                        self.selected_node = None;
+                    }
                 }
             },
+            Message::UiAction(action) => match action {
+                UiAction::SelectedNode(selected_node) => {
+                    self.selected_node = Some(selected_node);
+                }
+            }
             Message::Quit => {self.pipewire_sender.as_ref().unwrap().send(PwMessage::Terminate).expect("Failed to send message to pipewire");}
         }
     }
@@ -238,7 +308,13 @@ impl NodeGraph {
 
 impl Default for NodeGraph {
     fn default() -> Self {
-        Self { nodes: Default::default(), ports: Default::default(), links: Default::default(), pipewire_sender: None }
+        Self {
+            nodes: Default::default(),
+            ports: Default::default(),
+            links: Default::default(),
+            pipewire_sender: None,
+            selected_node: None,
+        }
     }
 }
 
