@@ -323,11 +323,24 @@ enum PwMessage {
     Terminate,
 }
 
+struct QuitPwOnDrop {
+    sender: pipewire::channel::Sender<PwMessage>,
+}
+
+impl Drop for QuitPwOnDrop {
+    fn drop(&mut self) {
+        self.sender.send(PwMessage::Terminate).expect("Failed to send message to pipewire");
+    }
+}
+
 fn pipewire_subscription(_: &NodeGraph) -> Subscription<Message> {
     Subscription::run(|| stream::channel(100, async |mut output| {
         let (bridge_sender, mut bridge_receiver) = tokio::sync::mpsc::channel(256);
         let (pw_sender, pw_receiver) = pipewire::channel::channel();
 
+        // iced will cancel this async stream, which will automatically drop our stack
+        // when this variable gets dropped, it will tell our pipewire mainloop to terminate
+        let _quit_on_drop = QuitPwOnDrop{sender: pw_sender.clone()};
         let result = output.send(Message::PwSender(pw_sender)).await;
         result.expect("Failed to send sender message");
         println!("sent sender message");
@@ -339,6 +352,9 @@ fn pipewire_subscription(_: &NodeGraph) -> Subscription<Message> {
         while let Some(ev) = bridge_receiver.recv().await {
             output.send(ev).await.expect("Failed to forward mpsc message");
         }
+
+        drop(_quit_on_drop);
+        println!("Done with subscription bridge loop");
 
         pw_thread.await.expect("Failed to wait for pipewire thread completion");
     }))
