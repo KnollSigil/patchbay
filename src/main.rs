@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{collections::{BTreeMap, BTreeSet, HashMap}};
 
 use iced::{Element, Font, Length, futures::SinkExt, widget::{Row, button, row, scrollable}};
 use iced_futures::core::font;
 use iced::{Subscription, stream, widget::{Column, Text}};
-use iced_aw::{helpers::card, style};
+use iced_aw::{TabBar, TabLabel, helpers::card, style};
 
 mod pw;
 
@@ -14,6 +14,7 @@ struct NodeGraph {
     links: HashMap<u32, pw::Link>,
     pipewire_sender: Option<pipewire::channel::Sender<PwMessage>>,
     selected_node: Option<u32>,
+    active_tab: NodeDetailsTabSelections,
 }
 
 struct Node {
@@ -34,6 +35,19 @@ enum Message {
 #[derive(Debug, Clone)]
 enum UiAction {
     SelectedNode(u32),
+    NodeDetailsTabAction(NodeDetailsTabAction),
+    ToggleNodeConnection(u32, u32),
+}
+
+#[derive(Debug, Clone)]
+enum NodeDetailsTabAction {
+    TabSelected(NodeDetailsTabSelections),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NodeDetailsTabSelections {
+    Links,
+    Info,
 }
 
 impl std::fmt::Debug for Message {
@@ -223,7 +237,7 @@ impl NodeGraph {
                     Text::new(node.pw_node.node_name.clone()),
                         row!(port_column, input_link_column, output_link_column).spacing(24),
                     ).style(style::card::primary)
-                ).on_press(Message::UiAction(UiAction::SelectedNode(node.pw_node.id)))
+                ).on_press(UiAction::SelectedNode(node.pw_node.id))
                 .padding(0)
             );
         }
@@ -256,7 +270,46 @@ impl NodeGraph {
         } else {
             node_info_col = node_info_col.push(Text::new("No selected node"));
         }
-        row!(scrollable(column.spacing(8)).width(Length::Fill), scrollable(node_info_col).width(Length::Fill)).into()
+
+        let mut node_details_pane_tab_bar = TabBar::new(|tab| UiAction::NodeDetailsTabAction(NodeDetailsTabAction::TabSelected(tab)));
+        node_details_pane_tab_bar = node_details_pane_tab_bar.push(NodeDetailsTabSelections::Links, TabLabel::Text("Links".to_string()));
+        node_details_pane_tab_bar = node_details_pane_tab_bar.push(NodeDetailsTabSelections::Info, TabLabel::Text("Info".to_string()));
+        node_details_pane_tab_bar = node_details_pane_tab_bar.set_active_tab(&self.active_tab);
+
+        let node_details_pane_content: Element<'_, _> = match self.active_tab {
+            NodeDetailsTabSelections::Links => self.view_node_link_pane(&ports_for_nodes, &links_for_ports),
+            NodeDetailsTabSelections::Info => node_info_col.into(),
+        };
+        let mut node_details_pane = Column::new();
+        node_details_pane = node_details_pane.push(node_details_pane_tab_bar);
+        node_details_pane = node_details_pane.push(scrollable(node_details_pane_content).width(Length::Fill));
+        let elem: Element<'_, UiAction> = row!(scrollable(column.spacing(8)).width(Length::Fill), node_details_pane.width(Length::Fill)).into();
+        elem.map(Message::UiAction)
+    }
+    fn view_node_link_pane(&self, ports_for_nodes: &HashMap<u32, Vec<u32>>, links_for_ports: &HashMap<u32, Vec<u32>>) -> Element<'_, UiAction> {
+        if let Some(selected_node) = self.selected_node {
+            let mut input_nodes_col = Column::new().spacing(4);
+            input_nodes_col = input_nodes_col.push(Text::new("Input Nodes"));
+
+            let mut input_nodes = BTreeSet::new();
+            for port in self.ports.values() {
+                if port.port_direction.eq("out") {
+                    input_nodes.insert(port.node_id);
+                }
+            }
+            for input_node in input_nodes {
+                let input_node = self.nodes.get(&input_node).unwrap();
+                input_nodes_col = input_nodes_col.push(
+                    button(input_node.pw_node.node_name.as_str())
+                    .on_press(UiAction::ToggleNodeConnection(input_node.pw_node.id, selected_node))
+                );
+            }
+            let mut output_nodes_col = Column::new().spacing(4);
+            output_nodes_col = output_nodes_col.push(Text::new("Output Nodes"));
+            row!(input_nodes_col.width(Length::Fill), output_nodes_col.width(Length::Fill)).into()
+        } else {
+            "No node selected".into()
+        }
     }
     fn update(&mut self, message: Message) {
         // println!("received update message {:?}", message);
@@ -300,6 +353,42 @@ impl NodeGraph {
                 UiAction::SelectedNode(selected_node) => {
                     self.selected_node = Some(selected_node);
                 }
+                UiAction::NodeDetailsTabAction(action) => match action {
+                    NodeDetailsTabAction::TabSelected(tab) => self.active_tab = tab,
+                }
+                UiAction::ToggleNodeConnection(outputting_node, inputting_node) => {
+                    // TODO: deduplicate with index creation in view()
+                    let mut ports_for_nodes: HashMap<u32, Vec<u32>> = HashMap::new();
+                    for (_, port) in &self.ports {
+                        let port_list = ports_for_nodes.entry(port.node_id).or_default();
+                        port_list.push(port.id);
+                    }
+
+                    // TODO: sorting by global.id or port.id are not reliable
+                    for (_, ports) in &mut ports_for_nodes {
+                        ports.sort_by(|a, b| {
+                            let a = self.ports.get(a).unwrap();
+                            let b = self.ports.get(b).unwrap();
+                            a.port_id.cmp(&b.port_id)
+                        })
+                    }
+                    let mut current_connections = Vec::new();
+                    for (_, link) in &self.links {
+                        let link_input_port = self.ports.get(&link.input_port).unwrap();
+                        let link_output_port = self.ports.get(&link.output_port).unwrap();
+                        if link_input_port.node_id == inputting_node && link_output_port.node_id == outputting_node {
+                            current_connections.push(PwRemovalId {
+                                id: link.id,
+                                object_serial: link.object_serial,
+                            });
+                        }
+                    }
+                    if current_connections.len() != 0 {
+                        self.pipewire_sender.as_ref().unwrap().send(PwMessage::DestroyGlobals(current_connections)).expect("Failed to send RemoveLinks message to pipewire");
+                    } else {
+                        println!("No links from {} to {}", inputting_node, outputting_node); // auto-connect
+                    }
+                }
             }
             Message::Quit => {self.pipewire_sender.as_ref().unwrap().send(PwMessage::Terminate).expect("Failed to send message to pipewire");}
         }
@@ -314,6 +403,7 @@ impl Default for NodeGraph {
             links: Default::default(),
             pipewire_sender: None,
             selected_node: None,
+            active_tab: NodeDetailsTabSelections::Links,
         }
     }
 }
@@ -321,6 +411,13 @@ impl Default for NodeGraph {
 #[derive(Debug)]
 enum PwMessage {
     Terminate,
+    DestroyGlobals(Vec<PwRemovalId>)
+}
+
+#[derive(Debug)]
+struct PwRemovalId {
+    id: u32,
+    object_serial: u64,
 }
 
 struct QuitPwOnDrop {

@@ -1,7 +1,7 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use pipewire::{context::ContextRc, main_loop::MainLoopRc, node, proxy, types::ObjectType};
+use pipewire::{context::ContextRc, link, main_loop::MainLoopRc, node, proxy, types::ObjectType};
 use crate::{Message, PwMessage, PwUpdate};
 
 #[derive(Debug, Clone)]
@@ -43,7 +43,7 @@ pub struct Port {
     pub object_serial: u64,
     pub object_path: String,
     pub node_id: u32,
-    pub format_dsp: String,
+    pub format_dsp: Option<String>,
     pub audio_channel: Option<String>,
     pub port_id: String,
     pub port_name: String,
@@ -57,6 +57,7 @@ pub struct Link {
     pub id: u32,
     pub input_port: u32,
     pub output_port: u32,
+    pub object_serial: u64,
 }
 
 pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewire::channel::Receiver<PwMessage>) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,7 +69,11 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
     let pending = Rc::new(RefCell::new(None));
     let main_sender = Rc::new(RefCell::new(main_sender));
 
+    // proxy id -> proxy and listeners
     let proxy_listeners: Rc<RefCell<HashMap<u32, (Box<dyn proxy::ProxyT>, [Box<dyn proxy::Listener>; 2])>>> = Default::default();
+
+    // global id -> object.serial
+    let global_serial_map: Rc<RefCell<HashMap<u32, u64>>> = Default::default();
 
     let core_weak = core.downgrade();
     let global_pending = Rc::downgrade(&pending);
@@ -78,12 +83,14 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
             let main_sender = main_sender.clone();
             let registry = registry.clone();
             let proxy_listeners = proxy_listeners.clone();
+            let global_serial_map = global_serial_map.clone();
             move |global| {
                 let pending = global_pending.upgrade().unwrap();
                 if *pending.borrow() == None {
                     pending.replace(Some(core_weak.upgrade().unwrap().sync(0).expect("sync failed")));
                 }
                 let mut proxy_and_listener: Option<(Box<dyn proxy::ProxyT>, Box<dyn proxy::Listener>)> = None;
+                let mut object_serial: Option<u64> = None;
                 match global.type_ {
                     ObjectType::Node => {
                         if let Some(props) = global.props {
@@ -95,7 +102,6 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
                             let mut application_name = None;
                             let mut media_role = None;
                             let mut client_api = None;
-                            let mut object_serial = None;
                             for (key, val) in props.iter() {
                                 match key {
                                     "node.name" => node_name = Some(val.to_string()),
@@ -163,7 +169,6 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
                         if let Some(props) = global.props {
                             println!("New port {} {}", global.id, props.get("object.path").unwrap_or(""));
                             let mut node_id = None;
-                            let mut object_serial = None;
                             let mut object_path = None;
                             let mut format_dsp = None;
                             let mut port_id = None;
@@ -187,21 +192,19 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
                                     _ => {},
                                 }
                             }
-                            if format_dsp.is_some() {
-                                main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::AddPort(Port {
-                                    id: global.id,
-                                    object_serial: object_serial.unwrap(),
-                                    object_path: object_path.unwrap(),
-                                    node_id: node_id.unwrap(),
-                                    port_id: port_id.unwrap(),
-                                    port_name: name.unwrap(),
-                                    port_direction: direction.unwrap(),
-                                    format_dsp: format_dsp.unwrap(),
-                                    port_group: group,
-                                    audio_channel: audio_channel,
-                                    port_alias: port_alias,
-                                }))).expect("Failed to send message to main");
-                            }
+                            main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::AddPort(Port {
+                                id: global.id,
+                                object_serial: object_serial.unwrap(),
+                                object_path: object_path.unwrap(),
+                                node_id: node_id.unwrap(),
+                                port_id: port_id.unwrap(),
+                                port_name: name.unwrap(),
+                                port_direction: direction.unwrap(),
+                                format_dsp: format_dsp,
+                                port_group: group,
+                                audio_channel: audio_channel,
+                                port_alias: port_alias,
+                            }))).expect("Failed to send message to main");
                         }
                     }
                     ObjectType::Link => {
@@ -213,6 +216,7 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
                                 match key {
                                     "link.input.port" => input_port = Some(val.parse().unwrap()),
                                     "link.output.port" => output_port = Some(val.parse().unwrap()),
+                                    "object.serial" => object_serial = Some(val.parse().unwrap()),
                                     _ => {},
                                 }
                             }
@@ -220,12 +224,16 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
                                 id: global.id,
                                 input_port: input_port.unwrap(),
                                 output_port: output_port.unwrap(),
+                                object_serial: object_serial.unwrap(),
                             }))).expect("Failed to send message to main");
                         }
                     }
                     _ => {
                         // println!("New global: {:#?}", global);
                     }
+                }
+                if let Some(object_serial) = object_serial {
+                    global_serial_map.borrow_mut().insert(global.id, object_serial);
                 }
                 if let Some((proxy, listener)) = proxy_and_listener {
                     let proxy_up = proxy.upcast_ref();
@@ -234,7 +242,6 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
                         .removed({
                             let proxy_listeners = proxy_listeners.clone();
                             move || {
-                                println!("proxy removed {}", proxy_id);
                                 proxy_listeners.borrow_mut().remove(&proxy_id);
                             }
                         })
@@ -247,16 +254,19 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
             let global_pending = Rc::downgrade(&pending);
             let main_sender = main_sender.clone();
             let core_weak = core.downgrade();
+            let global_serial_map = global_serial_map.clone();
             move |global| {
-            println!("remove global: {}", global);
-            let pending = global_pending.upgrade().unwrap();
-            if *pending.borrow() == None {
-                pending.replace(Some(core_weak.upgrade().unwrap().sync(0).expect("sync failed")));
-                println!("New pending destroyed: {}", pending.borrow().unwrap().seq());
+                println!("remove global: {}", global);
+                global_serial_map.borrow_mut().remove(&global);
+                let pending = global_pending.upgrade().unwrap();
+                if *pending.borrow() == None {
+                    pending.replace(Some(core_weak.upgrade().unwrap().sync(0).expect("sync failed")));
+                    println!("New pending destroyed: {}", pending.borrow().unwrap().seq());
+                }
+                main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::Remove(global)))
+                    .expect("Failed to send message to main");
             }
-            main_sender.borrow_mut().blocking_send(Message::PwUpdate(PwUpdate::Remove(global)))
-                .expect("Failed to send message to main");
-        }})
+        })
         .register();
 
     let _listener_core = core
@@ -274,9 +284,26 @@ pub fn run(main_sender:  tokio::sync::mpsc::Sender<Message>, pw_receiver: pipewi
         .register();
     let _attchrcv = pw_receiver.attach(mainloop.loop_(), {
         let mainloop = mainloop.clone();
-        move |_| {
-            println!("got a PwMessage message");
-            mainloop.quit();
+        let registry = registry.clone();
+        let global_serial_map = global_serial_map.clone();
+        move |action| match action {
+            PwMessage::Terminate => mainloop.quit(),
+            PwMessage::DestroyGlobals(removal_list) => {
+                for removal in removal_list {
+                    println!("Destroying... {}:{}", removal.id, removal.object_serial);
+                    if let Some(object_serial) = global_serial_map.borrow().get(&removal.id) {
+                        if *object_serial == removal.object_serial {
+                            registry.destroy_global(removal.id).into_result().expect("Failed to destroy pipewire global");
+                        } else {
+                            println!("global {} object.serial {} does not match object.serial of global to delete {}",
+                                removal.id, object_serial, removal.object_serial
+                            );
+                        }
+                    } else {
+                        println!("Unable to find object.serial for global {} in global_serial_map", removal.id);
+                    }
+                }
+            }
         }
     });
     mainloop.run();
